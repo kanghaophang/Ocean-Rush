@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-Hans">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Ocean Rush — Standalone</title>
+<style>
+* { box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Noto Sans CJK SC', 'Hiragino Sans GB', 'Microsoft YaHei', Arial, sans-serif;
+  margin: 0; padding: 0; background: #0c2540; color: #e7f3ff;
+}
+.app { max-width: 1100px; margin: 0 auto; padding: 16px; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+h1 { margin: 8px 0; font-size: 24px; }
+.badge { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid #6fb6ff; color: #6fb6ff; }
+.status { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.status div { background: rgba(255,255,255,0.06); padding: 6px 10px; border-radius: 8px; }
+main { display: grid; grid-template-columns: 1fr 240px; gap: 16px; margin-top: 12px; }
+@media (max-width: 820px){ main{ grid-template-columns: 1fr; } }
+.grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  grid-auto-rows: 70px;
+  gap: 6px;
+  background: linear-gradient(180deg, #0d2d51, #0a1d33);
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.1);
+}
+.cell {
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255,255,255,0.08);
+  border-radius: 10px; position: relative;
+  font-size: 28px; user-select: none;
+  transition: transform 120ms ease;
+}
+.cell.clearing { transform: scale(0.9); filter: brightness(1.3); }
+.mult {
+  position: absolute; bottom: 4px; right: 6px;
+  font-size: 12px; background: rgba(0,0,0,0.45); padding: 2px 6px; border-radius: 6px;
+  border: 1px solid rgba(255,255,255,0.12);
+}
+.panel { display: flex; flex-direction: column; gap: 8px; }
+button {
+  width: 100%; padding: 10px 12px; border: none; border-radius: 8px;
+  background: #1b6ee6; color: white; font-weight: 600; cursor: pointer;
+}
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+#buyBtn { background: #17a34a; }
+#resetBtn { background: #6b7280; }
+.log {
+  margin-top: 8px; background: rgba(255,255,255,0.06); border-radius: 8px; padding: 8px; height: 240px; overflow: auto; font-size: 13px;
+}
+footer { margin-top: 10px; opacity: 0.8; font-size: 13px; }
+</style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>🌊 Ocean Rush <span class="badge">Standalone v0.1</span></h1>
+      <div class="status">
+        <div>余额：<span id="balance">10000</span></div>
+        <div>注额：<button id="betDown">-</button><span id="bet">10</span><button id="betUp">+</button></div>
+        <div>模式：<span id="mode">Base Game</span></div>
+        <div>剩余免费旋转：<span id="fsLeft">0</span></div>
+      </div>
+    </header>
+
+    <main>
+      <div id="grid" class="grid"></div>
+      <aside class="panel">
+        <button id="spinBtn">旋转</button>
+        <button id="buyBtn">买免费（100x）</button>
+        <button id="resetBtn">重置</button>
+        <div class="log" id="log"></div>
+      </aside>
+    </main>
+
+    <footer>
+      <p>说明：7×7 盘面、≥5 连通集消除、下落补齐；免费局内同格子命中倍率×2 累加并保留，直到免费局结束。</p>
+    </footer>
+  </div>
+
+<script>
+// --- Ocean Rush Standalone JS ---
+const ROWS = 7, COLS = 7;
+const GRID_SIZE = ROWS * COLS;
+const SYMBOLS = [
+  { id:'fish', glyph:'🐠', weight: 24, base: 1 },
+  { id:'octo', glyph:'🐙', weight: 20, base: 1 },
+  { id:'star', glyph:'⭐',  weight: 14, base: 2 },
+  { id:'dolphin', glyph:'🐬', weight: 12, base: 3 },
+  { id:'crab', glyph:'🦀', weight: 10, base: 4 },
+  { id:'puffer', glyph:'🐡', weight: 8,  base: 5 },
+];
+const CLUSTER_MIN = 5;
+const MAX_MULT = 128;
+const FS_SPINS = 10;
+const BUY_FEATURE_MULT = 100;
+
+let grid = new Array(GRID_SIZE).fill(null);
+let mults = new Array(GRID_SIZE).fill(1);
+let inFreeSpins = false;
+let fsLeft = 0;
+let balance = 10000;
+let bet = 10;
+let busy = false;
+
+const els = {
+  grid: document.getElementById('grid'),
+  log: document.getElementById('log'),
+  balance: document.getElementById('balance'),
+  bet: document.getElementById('bet'),
+  betUp: document.getElementById('betUp'),
+  betDown: document.getElementById('betDown'),
+  spinBtn: document.getElementById('spinBtn'),
+  buyBtn: document.getElementById('buyBtn'),
+  resetBtn: document.getElementById('resetBtn'),
+  mode: document.getElementById('mode'),
+  fsLeft: document.getElementById('fsLeft'),
+};
+
+function log(s){ const d=document.createElement('div'); d.textContent=s; els.log.prepend(d); }
+function updateUI(){
+  els.balance.textContent = balance.toFixed(0);
+  els.bet.textContent = bet.toFixed(0);
+  els.mode.textContent = inFreeSpins ? 'Free Spins' : 'Base Game';
+  els.fsLeft.textContent = fsLeft;
+  els.spinBtn.disabled = busy || (inFreeSpins && fsLeft <= 0);
+  els.buyBtn.disabled = busy || inFreeSpins || balance < bet * BUY_FEATURE_MULT;
+  els.betUp.disabled = busy || inFreeSpins;
+  els.betDown.disabled = busy || inFreeSpins || bet <= 1;
+}
+function randSym(){
+  const total = SYMBOLS.reduce((a,s)=>a+s.weight, 0);
+  let r = Math.random() * total;
+  for (const s of SYMBOLS){ if ((r -= s.weight) <= 0) return s.id; }
+  return SYMBOLS[0].id;
+}
+function symGlyph(id){ return SYMBOLS.find(s=>s.id===id).glyph; }
+function symBase(id){ return SYMBOLS.find(s=>s.id===id).base; }
+function idx(r,c){ return r*COLS + c; }
+function rc(i){ return [Math.floor(i/COLS), i%COLS]; }
+function fillGrid(){ for (let i=0;i<GRID_SIZE;i++) grid[i]=randSym(); }
+function render(){
+  els.grid.innerHTML = '';
+  for (let i=0;i<GRID_SIZE;i++){
+    const cell = document.createElement('div');
+    cell.className = 'cell';
+    cell.dataset.i = i;
+    cell.textContent = symGlyph(grid[i]);
+    const m = mults[i];
+    if (m > 1){
+      const tag = document.createElement('div');
+      tag.className = 'mult'; tag.textContent = `x${m}`; cell.appendChild(tag);
+    }
+    els.grid.appendChild(cell);
+  }
+}
+function neighbors(i){
+  const [r,c] = rc(i); const res=[];
+  if (r>0) res.push(idx(r-1,c));
+  if (r<ROWS-1) res.push(idx(r+1,c));
+  if (c>0) res.push(idx(r,c-1));
+  if (c<COLS-1) res.push(idx(r,c+1));
+  return res;
+}
+function findClusters(){
+  const visited = new Set(); const clusters=[];
+  for (let i=0;i<GRID_SIZE;i++){
+    if (visited.has(i)) continue;
+    const s = grid[i]; const stack=[i]; const cluster=[]; visited.add(i);
+    while (stack.length){
+      const cur = stack.pop(); cluster.push(cur);
+      for (const nb of neighbors(cur)){
+        if (!visited.has(nb) && grid[nb]===s){ visited.add(nb); stack.push(nb); }
+      }
+    }
+    if (cluster.length >= CLUSTER_MIN) clusters.push(cluster);
+  }
+  return clusters;
+}
+function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
+async function clearClusters(clusters){
+  const cells = Array.from(els.grid.children);
+  for (const cl of clusters){ for (const i of cl) cells[i].classList.add('clearing'); }
+  await sleep(180);
+  let won = 0;
+  for (const cl of clusters){
+    const id = grid[cl[0]]; const base = symBase(id);
+    const sumMult = cl.reduce((a,i)=>a+mults[i], 0);
+    const unit = base * cl.length * sumMult * (bet / 10);
+    won += unit;
+    if (inFreeSpins){ for (const i of cl) mults[i] = Math.min(128, mults[i]*2); }
+  }
+  const cleared = new Set(clusters.flat());
+  for (const i of cleared){ grid[i]=null; }
+  render(); await sleep(80); return won;
+}
+function applyGravityAndRefill(){
+  for (let c=0;c<COLS;c++){
+    const col=[];
+    for (let r=0;r<ROWS;r++){ const i=idx(r,c); if (grid[i]!==null) col.push(grid[i]); }
+    const missing = ROWS - col.length;
+    const newCol = Array(missing).fill(null).map(()=>randSym()).concat(col);
+    for (let r=0;r<ROWS;r++){
+      const i=idx(r,c); grid[i]=newCol[r];
+      if (!inFreeSpins) mults[i]=1;
+    }
+  }
+}
+async function runCascades(){
+  let totalWin = 0;
+  while (true){
+    const clusters = findClusters();
+    if (!clusters.length) break;
+    const w = await clearClusters(clusters);
+    totalWin += w;
+    applyGravityAndRefill();
+    render();
+    await sleep(120);
+  }
+  return totalWin;
+}
+async function doSpin(){
+  if (busy) return; busy=true; updateUI();
+  if (!inFreeSpins){
+    if (balance < bet){ log('余额不足'); busy=false; updateUI(); return; }
+    balance -= bet;
+  }
+  fillGrid(); if (!inFreeSpins) mults = mults.map(()=>1); render();
+  const win = await runCascades(); balance += win;
+  if (inFreeSpins){
+    fsLeft -= 1;
+    if (fsLeft <= 0){ inFreeSpins=false; mults=mults.map(()=>1); log(`🧨 免费局结算：赢得 ${win.toFixed(0)}，返回基础模式`); }
+    else { log(`✨ 免费局：本次赢得 ${win.toFixed(0)}；剩余 FS：${fsLeft}`); }
+  } else { log(`🎰 基础：下注 ${bet}，赢得 ${win.toFixed(0)}`); }
+  busy=false; updateUI();
+}
+function buyFeature(){
+  const cost = bet * 100;
+  if (balance < cost){ log('余额不足，无法购买免费局'); return; }
+  balance -= cost; inFreeSpins = true; fsLeft = 10; mults = mults.map(()=>1);
+  log(`🛒 购买免费局：花费 ${cost}，共 ${10} 次。`); updateUI();
+}
+function resetAll(){
+  balance = 10000; bet = 10; inFreeSpins=false; fsLeft=0; mults = mults.map(()=>1);
+  fillGrid(); render(); updateUI(); els.log.innerHTML=''; log('🔄 重置完成');
+}
+document.getElementById('spinBtn').addEventListener('click', ()=>doSpin());
+document.getElementById('buyBtn').addEventListener('click', ()=>{ if (!busy) buyFeature(); updateUI(); });
+document.getElementById('resetBtn').addEventListener('click', ()=>{ if (!busy) resetAll(); });
+document.getElementById('betUp').addEventListener('click', ()=>{ if (!busy){ bet=Math.min(1000, bet+1); updateUI(); }});
+document.getElementById('betDown').addEventListener('click', ()=>{ if (!busy){ bet=Math.max(1, bet-1); updateUI(); }});
+fillGrid(); render(); updateUI();
+log('欢迎来到 Ocean Rush（Standalone）。点“旋转”或“买免费（100x）”。');
+</script>
+</body>
+</html>
